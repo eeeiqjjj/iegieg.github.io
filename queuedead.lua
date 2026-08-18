@@ -1,109 +1,179 @@
--- Wait for game to load
-repeat wait() until game:IsLoaded()
+repeat task.wait() until game:IsLoaded()
 
-local lobbyPlaceId = 116495829188952 -- Specify the lobby PlaceId
-local TweenService = game:GetService("TweenService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TeleportService = game:GetService("TeleportService")
-local HttpService = game:GetService("HttpService")
+
+local lobbyPlaceId = 116495829188952
+local TRAIN_ID = "all"
+local MAX_MEMBERS = 1
+local IS_PRIVATE = true
+local GAME_MODE = "Normal"
+
+local TRAIN_IDS = {
+    "yeat",
+    "frost",
+    "armored",
+    "golden",
+    "christmas_event_2025",
+    "passenger",
+    "oddthings_promo",
+    "default",
+    "wooden",
+    "dracula",
+    "presidential",
+    "locomotive",
+    "ghost",
+    "cattle",
+    "developer"
+}
+
 local player = Players.LocalPlayer
 
--- Only execute if the current PlaceId matches the lobbyPlaceId
-if game.PlaceId == lobbyPlaceId then
-    local CreateParty = ReplicatedStorage.Shared.Network.RemoteEvent.CreateParty
+assert(player, "LocalPlayer is nil. Run this from a LocalScript.")
 
-    -- Repeatedly find a "Waiting for players..." PartyZone, teleport to it, and create a party
-    local function findAndCreatePartyLoop()
-        while true do
-            local HRP = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-            if not HRP then
-                player.CharacterAdded:Wait()
-                HRP = player.Character:WaitForChild("HumanoidRootPart")
-            end
+if game.PlaceId ~= lobbyPlaceId then
+    warn("Wrong place. Current PlaceId:", game.PlaceId)
+    return
+end
 
-            local FoundLobby = false
+local function getRequiredChild(parent, name)
+    local child = parent:WaitForChild(name, 15)
 
-            for _, v in pairs(workspace.PartyZones:GetChildren()) do
-                if v.Name:match("PartyZone") and v:FindFirstChild("BillboardGui")
-                    and v.BillboardGui:FindFirstChild("StatusLabel")
-                    and v.BillboardGui.StatusLabel.Text == "Waiting for players..." then
-
-                    print("Lobby Found!")
-                    HRP.CFrame = v:FindFirstChild("Hitbox").CFrame
-                    FoundLobby = true
-                    task.wait(0.1)
-
-                    local args = {
-                        {
-                            isPrivate = true,
-                            maxMembers = 1,
-                            trainId = "default",
-                            gameMode = "Normal"
-                        }
-                    }
-                    CreateParty:FireServer(unpack(args))
-                    break
-                end
-            end
-
-            -- Wait ~7 seconds before trying again
-            task.wait(3)
-        end
+    if not child then
+        error(("Missing %q inside %s"):format(name, parent:GetFullName()))
     end
 
-    -- Function to check if the player has been teleported
-    local function hasBeenTeleported()
-        return game.PlaceId ~= lobbyPlaceId
+    return child
+end
+
+local Shared = getRequiredChild(ReplicatedStorage, "Shared")
+local Universe = getRequiredChild(Shared, "Universe")
+local Network = getRequiredChild(Universe, "Network")
+local RemoteEventFolder = getRequiredChild(Network, "RemoteEvent")
+
+local CreateParty = getRequiredChild(RemoteEventFolder, "CreateParty")
+local PartyZoneReserved = getRequiredChild(RemoteEventFolder, "PartyZoneReserved")
+
+assert(CreateParty:IsA("RemoteEvent"), "CreateParty is not a RemoteEvent")
+assert(PartyZoneReserved:IsA("RemoteEvent"), "PartyZoneReserved is not a RemoteEvent")
+
+if TRAIN_ID ~= "all" and not table.find(TRAIN_IDS, TRAIN_ID) then
+    error("Invalid TRAIN_ID: " .. tostring(TRAIN_ID))
+end
+
+local function getTrainId()
+    if TRAIN_ID ~= "all" then
+        return TRAIN_ID
     end
 
-    -- Function to get a low-player server
-    local function getLowPlayerServer(cursor)
-        local apiUrl = "https://games.roblox.com/v1/games/" .. lobbyPlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
-        local url = apiUrl .. ((cursor and "&cursor=" .. cursor) or "")
-        local success, response = pcall(function()
-            return game:HttpGet(url)
-        end)
+    local random = Random.new()
+    return TRAIN_IDS[random:NextInteger(1, #TRAIN_IDS)]
+end
 
-        if success then
-            local data = HttpService:JSONDecode(response)
-            for _, server in pairs(data.data) do
-                if server.playing < 3 and server.id ~= game.JobId then
-                    return server.id
-                end
-            end
-            return data.nextPageCursor
-        end
+local function getHumanoidRootPart()
+    local character = player.Character or player.CharacterAdded:Wait()
+    return character:WaitForChild("HumanoidRootPart", 15)
+end
 
-        warn("Failed to fetch server list.")
-        return nil
+local function isWaitingZone(zone)
+    local statusLabel = zone:FindFirstChild("StatusLabel", true)
+
+    if not statusLabel or not statusLabel:IsA("TextLabel") then
+        return false
     end
 
-    -- Delayed teleportation check for server hopping
-    task.spawn(function()
-        wait(25)
-        if game.PlaceId == lobbyPlaceId then
-            local serverId, cursor = nil, nil
-            repeat
-                cursor = getLowPlayerServer(cursor)
-                if cursor and not serverId then
-                    serverId = cursor
-                end
-            until serverId or not cursor
+    return statusLabel.Text:find("Waiting for players", 1, true) ~= nil
+end
 
-            if serverId then
-                print("Teleporting to a low-player server...")
-                TeleportService:TeleportToPlaceInstance(lobbyPlaceId, serverId, player)
-            else
-                warn("No suitable server found.")
-            end
-        else
-            print("Not in the lobby, skipping server hop.")
-        end
+local function createPartyAtZone(zone)
+    local hitbox = zone:FindFirstChild("Hitbox", true)
+
+    if not hitbox or not hitbox:IsA("BasePart") then
+        warn("No valid Hitbox found in:", zone:GetFullName())
+        return false
+    end
+
+    local rootPart = getHumanoidRootPart()
+
+    if not rootPart then
+        warn("HumanoidRootPart was not found")
+        return false
+    end
+
+    local reserved = false
+    local created = false
+
+    local reservationConnection = PartyZoneReserved.OnClientEvent:Connect(function()
+        reserved = true
     end)
 
-    -- Start the party-finding/creation loop in parallel
-    task.spawn(findAndCreatePartyLoop)
-else
-    print("Not in the local lobby. Script will not run.")
+    local createConnection = CreateParty.OnClientEvent:Connect(function()
+        created = true
+    end)
+
+    rootPart.CFrame = hitbox.CFrame + Vector3.new(0, 3, 0)
+
+    local reservationTimeout = os.clock() + 5
+
+    while not reserved and os.clock() < reservationTimeout do
+        task.wait(0.1)
+    end
+
+    reservationConnection:Disconnect()
+
+    if not reserved then
+        createConnection:Disconnect()
+        warn("Party zone was not reserved:", zone:GetFullName())
+        return false
+    end
+
+    task.wait(0.15)
+
+    local selectedTrainId = getTrainId()
+
+    local partySettings = {
+        isPrivate = IS_PRIVATE,
+        trainId = selectedTrainId,
+        maxMembers = MAX_MEMBERS,
+        gameMode = GAME_MODE
+    }
+
+    local success, errorMessage = pcall(function()
+        CreateParty:FireServer(partySettings)
+    end)
+
+    if not success then
+        createConnection:Disconnect()
+        warn("CreateParty failed:", errorMessage)
+        return false
+    end
+
+    local createTimeout = os.clock() + 5
+
+    while not created and os.clock() < createTimeout do
+        task.wait(0.1)
+    end
+
+    createConnection:Disconnect()
+
+    if not created then
+        warn("The party request was sent, but no confirmation was received")
+        return false
+    end
+
+    print("Party created successfully")
+    print("Train:", selectedTrainId)
+    print("Game mode:", GAME_MODE)
+
+    return true
+end
+
+local PartyZones = workspace:WaitForChild("PartyZones", 15)
+
+assert(PartyZones, "workspace.PartyZones was not found")
+
+for _, zone in ipairs(PartyZones:GetChildren()) do
+    if isWaitingZone(zone) and createPartyAtZone(zone) then
+        break
+    end
 end
