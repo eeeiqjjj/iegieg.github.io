@@ -5,6 +5,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local lobbyPlaceId = 116495829188952
 local TRAIN_ID = "all"
+local TARGET_ZONE_NAME = nil
 local MAX_MEMBERS = 1
 local IS_PRIVATE = true
 local GAME_MODE = "Normal"
@@ -123,17 +124,15 @@ local function createPartyAtZone(zone)
 
     if not reserved then
         createConnection:Disconnect()
-        warn("Party zone was not reserved:", zone:GetFullName())
+        warn("Party zone was not reserved")
         return false
     end
 
     task.wait(0.15)
 
-    local selectedTrainId = getTrainId()
-
     local partySettings = {
         isPrivate = IS_PRIVATE,
-        trainId = selectedTrainId,
+        trainId = getTrainId(),
         maxMembers = MAX_MEMBERS,
         gameMode = GAME_MODE
     }
@@ -157,13 +156,9 @@ local function createPartyAtZone(zone)
     createConnection:Disconnect()
 
     if not created then
-        warn("The party request was sent, but no confirmation was received")
+        warn("No party confirmation was received")
         return false
     end
-
-    print("Party created successfully")
-    print("Train:", selectedTrainId)
-    print("Game mode:", GAME_MODE)
 
     return true
 end
@@ -172,8 +167,28 @@ local PartyZones = workspace:WaitForChild("PartyZones", 15)
 
 assert(PartyZones, "workspace.PartyZones was not found")
 
+local candidates = {}
+
 for _, zone in ipairs(PartyZones:GetChildren()) do
-    if isWaitingZone(zone) and createPartyAtZone(zone) then
-        break
+    if isWaitingZone(zone) then
+        if not TARGET_ZONE_NAME or zone.Name == TARGET_ZONE_NAME then
+            table.insert(candidates, zone)
+        end
     end
+end
+
+if #candidates == 0 then
+    warn("No matching waiting party zone was found")
+    return
+end
+
+if #candidates > 1 and not TARGET_ZONE_NAME then
+    warn("Multiple waiting party zones were found. Set TARGET_ZONE_NAME before continuing.")
+    return
+end
+
+local selectedZone = candidates[1]
+
+if not createPartyAtZone(selectedZone) then
+    warn("The selected party zone was not reserved")
 end
